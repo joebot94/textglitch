@@ -2,7 +2,8 @@
 
 import Foundation
 
-let maxCells = 16
+/// Must be ≥ the largest possible gridRows × gridCols (currently 32×24 = 768).
+let maxCells = 4096
 
 struct GridProfile {
     let name: String
@@ -11,11 +12,25 @@ struct GridProfile {
 }
 
 let gridProfiles: [GridProfile] = [
-    GridProfile(name: "1×1", rows: 1, cols: 1),
-    GridProfile(name: "2×2", rows: 2, cols: 2),
-    GridProfile(name: "3×3", rows: 3, cols: 3),
-    GridProfile(name: "3×4", rows: 3, cols: 4),
-    GridProfile(name: "4×4", rows: 4, cols: 4),
+    // ── Small / legacy ────────────────────────────────────────────
+    GridProfile(name: "1×1",   rows: 1,  cols: 1),
+    GridProfile(name: "2×2",   rows: 2,  cols: 2),
+    GridProfile(name: "3×3",   rows: 3,  cols: 3),
+    GridProfile(name: "3×4",   rows: 3,  cols: 4),
+    GridProfile(name: "4×4",   rows: 4,  cols: 4),
+    // ── Medium ────────────────────────────────────────────────────
+    GridProfile(name: "5×4",   rows: 5,  cols: 4),
+    GridProfile(name: "6×4",   rows: 6,  cols: 4),
+    GridProfile(name: "6×6",   rows: 6,  cols: 6),
+    GridProfile(name: "8×6",   rows: 8,  cols: 6),
+    GridProfile(name: "8×8",   rows: 8,  cols: 8),
+    GridProfile(name: "9×16",  rows: 9,  cols: 16),  // widescreen portrait
+    // ── Large (Metal renderer shines here) ────────────────────────
+    GridProfile(name: "12×9",  rows: 12, cols: 9),
+    GridProfile(name: "16×9",  rows: 16, cols: 9),   // classic widescreen ratio
+    GridProfile(name: "16×12", rows: 16, cols: 12),
+    GridProfile(name: "24×18", rows: 24, cols: 18),
+    GridProfile(name: "32×24", rows: 32, cols: 24),  // 768 cells
 ]
 
 let gridProfileNames: [String] = gridProfiles.map { $0.name }

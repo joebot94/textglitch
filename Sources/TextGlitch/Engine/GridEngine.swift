@@ -305,6 +305,41 @@ final class GridEngine {
         ticked.send(pointer)
     }
 
+    // MARK: - Batch display data (O(n) — preferred over calling getCellText/Color per cell)
+
+    /// Returns (text, colorHex) for every cell in one pass.
+    /// Avoids repeated visibleIndices computation when iterating large grids.
+    func batchCellDisplayData() -> [(text: String, color: String)] {
+        let active   = visibleIndices
+        let orderMap = Dictionary(uniqueKeysWithValues: active.enumerated().map { ($1, $0) })
+        let n        = max(1, tokens.count)
+        return (0..<cellCount).map { i in
+            // ── text ──
+            let text: String
+            if let order = orderMap[i], !tokens.isEmpty {
+                let tok: String
+                switch distribution {
+                case .allSame:    tok = tokens[pointer % n]
+                case .random:     tok = tokens[randSnap[i % maxCells] % n]
+                case .sequential: tok = tokens[(pointer + order) % n]
+                }
+                text = applyTransform(tok)
+            } else {
+                text = ""
+            }
+            // ── color ──
+            let order2 = orderMap[i] ?? 0
+            let color: String
+            switch colorMode {
+            case .perCell: color = cellColors[i % maxCells]
+            case .random:  color = neonPalette[randSnap[i % maxCells] % neonPalette.count]
+            case .cycle:   color = neonPalette[(pointer + order2) % neonPalette.count]
+            case .global:  color = globalColor
+            }
+            return (text, color)
+        }
+    }
+
     // MARK: - Custom cell helpers
     func toggleCustomCell(_ idx: Int) {
         guard idx >= 0 && idx < cellCount else { return }

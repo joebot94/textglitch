@@ -1,13 +1,11 @@
-// DisplayWindowController.swift — Output grid window (port of display_window.py DisplayWindow)
+// DisplayWindowController.swift — Output grid window, now backed by MetalDisplayView.
 
 import AppKit
-import Combine
+import MetalKit
 
 final class DisplayWindowController: NSWindowController, NSWindowDelegate {
     private let engine: GridEngine
-    private var gridView: NSView!
-    private var cells: [CellView] = []
-    private var cancellables: Set<AnyCancellable> = []
+    private var metalView: MetalDisplayView!
 
     init(engine: GridEngine) {
         self.engine = engine
@@ -18,96 +16,35 @@ final class DisplayWindowController: NSWindowController, NSWindowDelegate {
             defer: false
         )
         win.title = "TEXT GRID — Display"
-        win.minSize = NSSize(width: 400, height: 400)
+        win.minSize = NSSize(width: 300, height: 300)
         win.backgroundColor = .black
         super.init(window: win)
         win.delegate = self
-        setupGrid()
-        bindEngine()
+        setupMetal()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    // MARK: - Setup
+    // MARK: – Metal setup
 
-    private func setupGrid() {
-        gridView = FlippedView()
-        gridView.wantsLayer = true
-        gridView.layer?.backgroundColor = NSColor.black.cgColor
-        window?.contentView = gridView
-        rebuildCells()
-    }
-
-    private func rebuildCells() {
-        cells.forEach { $0.removeFromSuperview() }
-        cells.removeAll()
-        for i in 0..<engine.cellCount {
-            let cell = CellView(index: i, engine: engine)
-            gridView.addSubview(cell)
-            cells.append(cell)
+    private func setupMetal() {
+        guard let dev = MTLCreateSystemDefaultDevice() else {
+            // Extremely unlikely on macOS 13+, but handle gracefully
+            let label = NSTextField(labelWithString: "⚠️ Metal unavailable on this GPU.")
+            label.textColor = .red
+            window?.contentView = label
+            return
         }
-        layoutCells()
+
+        // MTKView wants a device in its initialiser for proper layer setup
+        metalView = MetalDisplayView(frame: window!.contentRect(forFrameRect: window!.frame),
+                                     device: dev)
+        metalView.autoresizingMask = [.width, .height]
+        window?.contentView = metalView
+        metalView.configure(engine: engine)
     }
 
-    private func layoutCells() {
-        guard let frame = gridView?.bounds, !cells.isEmpty else { return }
-        let rows = engine.gridRows
-        let cols = engine.gridCols
-        let spacing: CGFloat = engine.showBoxes ? 1 : 0
-        let cellW = (frame.width  - spacing * CGFloat(cols - 1)) / CGFloat(cols)
-        let cellH = (frame.height - spacing * CGFloat(rows - 1)) / CGFloat(rows)
-
-        for (i, cell) in cells.enumerated() {
-            let row = i / cols
-            let col = i % cols
-            let x = CGFloat(col) * (cellW + spacing)
-            let y = CGFloat(row) * (cellH + spacing)
-            cell.frame = CGRect(x: x, y: y, width: cellW, height: cellH)
-        }
-    }
-
-    // MARK: - Engine bindings
-
-    private func bindEngine() {
-        engine.ticked
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.onTick() }
-            .store(in: &cancellables)
-
-        engine.displayChanged
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.refreshAll() }
-            .store(in: &cancellables)
-    }
-
-    private func onTick() {
-        let activeSet = Set(engine.visibleIndices)
-        for cell in cells {
-            if activeSet.contains(cell.index) {
-                cell.triggerFlash()
-            } else {
-                cell.needsDisplay = true
-            }
-        }
-    }
-
-    private func refreshAll() {
-        gridView.layer?.backgroundColor = (NSColor(hex: engine.bgColor) ?? .black).cgColor
-        if cells.count != engine.cellCount {
-            rebuildCells()
-        } else {
-            layoutCells()
-            cells.forEach { $0.needsDisplay = true }
-        }
-    }
-
-    // MARK: - Window delegate
-
-    func windowDidResize(_ notification: Notification) {
-        layoutCells()
-    }
-
-    // MARK: - Fullscreen / screen targeting
+    // MARK: – Fullscreen / screen targeting
 
     func toggleFullscreen() {
         window?.toggleFullScreen(nil)
@@ -123,7 +60,7 @@ final class DisplayWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    // MARK: - Key handling
+    // MARK: – Key handling
 
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
@@ -133,9 +70,9 @@ final class DisplayWindowController: NSWindowController, NSWindowDelegate {
             toggleFullscreen()
         case 49:  // Space — play/pause
             engine.togglePlay()
-        case 124: // Right arrow
+        case 124: // →
             engine.step(1)
-        case 123: // Left arrow
+        case 123: // ←
             engine.step(-1)
         case 15:  // R — reset
             engine.reset()
@@ -143,10 +80,4 @@ final class DisplayWindowController: NSWindowController, NSWindowDelegate {
             super.keyDown(with: event)
         }
     }
-}
-
-// MARK: - Flipped view (top-left origin like Qt)
-
-private final class FlippedView: NSView {
-    override var isFlipped: Bool { true }
 }

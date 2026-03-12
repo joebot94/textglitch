@@ -261,16 +261,24 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
 
         stack.addArrangedSubview(sectionLabel("INPUT TEXT"))
 
-        let scrolled = NSScrollView()
+        // Proper scrollable text view setup — NSTextView.scrollableTextView()
+        // automatically wires up the clip view, container, and sizing correctly
+        let scrolled = NSTextView.scrollableTextView()
         scrolled.hasVerticalScroller = true
-        textView = NSTextView()
+        scrolled.autohidesScrollers = true
+        textView = (scrolled.documentView as! NSTextView)
         textView.string = engine.rawText
         textView.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        textView.textColor = NSColor(white: 0.8, alpha: 1)
+        textView.backgroundColor = NSColor(white: 0.07, alpha: 1)
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isRichText = false
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
         textView.delegate = self
-        scrolled.documentView = textView
-        scrolled.heightAnchor.constraint(equalToConstant: 130).isActive = true
+        scrolled.heightAnchor.constraint(equalToConstant: 140).isActive = true
         stack.addArrangedSubview(scrolled)
 
         tokenLabel = makeLabel("0 tokens")
@@ -322,6 +330,7 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
 
     private var fontSizeLabel: NSTextField!
     private var swatchButtons: [(NSButton, String)] = []
+    private var customColorWell: NSColorWell!
 
     private func buildStyleTab() -> NSView {
         let stack = vStack(spacing: 10, margins: 12)
@@ -351,25 +360,45 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
 
         stack.addArrangedSubview(divider())
         stack.addArrangedSubview(sectionLabel("TEXT COLOR (GLOBAL / CYCLE)"))
-        let swatchGrid = NSGridView(); swatchGrid.rowSpacing = 4; swatchGrid.columnSpacing = 4
-        var swRow: [NSView] = []
+
+        // Palette rows — 6 per row, no text on buttons
+        let swatchOuter = vStack(spacing: 4, margins: 0)
+        var currentSwatchRow = hStack(spacing: 4)
         for (i, colorHex) in neonPalette.enumerated() {
             let btn = makeColorSwatch(colorHex, selected: colorHex == engine.globalColor, tag: 1100 + i)
             swatchButtons.append((btn, colorHex))
-            swRow.append(btn)
-            if swRow.count == 6 { swatchGrid.addRow(with: swRow); swRow = [] }
+            currentSwatchRow.addArrangedSubview(btn)
+            if (i + 1) % 6 == 0 {
+                swatchOuter.addArrangedSubview(currentSwatchRow)
+                currentSwatchRow = hStack(spacing: 4)
+            }
         }
-        if !swRow.isEmpty { swatchGrid.addRow(with: swRow) }
-        stack.addArrangedSubview(swatchGrid)
+        // Remaining palette items + custom color well on last row
+        if currentSwatchRow.arrangedSubviews.count > 0 {
+            swatchOuter.addArrangedSubview(currentSwatchRow)
+        }
+        // Custom color well row
+        let customRow = hStack(spacing: 6)
+        customColorWell = NSColorWell()
+        customColorWell.color = NSColor(hex: engine.globalColor) ?? .orange
+        customColorWell.tag = 1198
+        customColorWell.widthAnchor.constraint(equalToConstant: 30).isActive = true
+        customColorWell.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        customColorWell.target = self
+        customColorWell.action = #selector(colorWellChanged(_:))
+        let customLbl = sectionLabel("CUSTOM")
+        customRow.addArrangedSubview(customColorWell)
+        customRow.addArrangedSubview(customLbl)
+        swatchOuter.addArrangedSubview(customRow)
+        stack.addArrangedSubview(swatchOuter)
 
         stack.addArrangedSubview(sectionLabel("BACKGROUND"))
-        let bgRow = hStack()
+        let bgRow = hStack(spacing: 4)
         let bgColors = ["#000000", "#050505", "#0a0000", "#000a00", "#00000a", "#080808"]
         for (i, c) in bgColors.enumerated() {
             let btn = makeColorSwatch(c, selected: c == engine.bgColor, tag: 1200 + i)
             bgRow.addArrangedSubview(btn)
         }
-        bgRow.addArrangedSubview(NSView())
         stack.addArrangedSubview(bgRow)
 
         stack.addArrangedSubview(NSView())
@@ -890,6 +919,16 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
         engine.displayChanged.send()
     }
 
+    @objc private func colorWellChanged(_ sender: NSColorWell) {
+        guard let rgb = sender.color.usingColorSpace(.sRGB) else { return }
+        let r = Int((rgb.redComponent   * 255).rounded())
+        let g = Int((rgb.greenComponent * 255).rounded())
+        let b = Int((rgb.blueComponent  * 255).rounded())
+        engine.globalColor = String(format: "#%02x%02x%02x", r, g, b)
+        engine.displayChanged.send()
+        syncSwatchButtons()  // deselect palette swatches (custom color active)
+    }
+
     // MARK: - Actions: Play
 
     @objc private func timingModePressed(_ sender: NSButton) {
@@ -1126,11 +1165,11 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
 
     private func syncSwatchButtons() {
         for (btn, colorHex) in swatchButtons {
-            let selected = colorHex == engine.globalColor
-            let border: CGFloat = selected ? 2 : 0
-            btn.layer?.borderWidth = border
+            btn.layer?.borderWidth = colorHex == engine.globalColor ? 2 : 0
             btn.layer?.borderColor = NSColor.white.cgColor
         }
+        // Keep the color well showing the current global color
+        customColorWell?.color = NSColor(hex: engine.globalColor) ?? .orange
     }
 
     private func syncTimingButtons() {
@@ -1246,16 +1285,17 @@ private func scrollWrap(_ view: NSView) -> NSView {
 private extension ControlWindowController {
     func makeColorSwatch(_ hex: String, selected: Bool, tag: Int) -> NSButton {
         let btn = NSButton(frame: NSRect(x: 0, y: 0, width: 26, height: 26))
+        btn.title = ""            // no text — pure color block
         btn.bezelStyle = .rounded
         btn.isBordered = false
         btn.wantsLayer = true
         btn.layer?.backgroundColor = NSColor(hex: hex)?.cgColor ?? NSColor.black.cgColor
         btn.layer?.borderWidth = selected ? 2 : 0
         btn.layer?.borderColor = NSColor.white.cgColor
+        btn.layer?.cornerRadius = 2
         btn.widthAnchor.constraint(equalToConstant: 26).isActive = true
         btn.heightAnchor.constraint(equalToConstant: 26).isActive = true
         btn.tag = tag
-        // Route to correct action based on tag range
         if tag >= 1200 {
             btn.target = self; btn.action = #selector(bgSwatchPressed(_:))
         } else {

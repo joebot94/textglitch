@@ -92,6 +92,8 @@ final class GridEngine {
     var glowEnabled: Bool = true
     var flashEnabled: Bool = true
     var showBoxes: Bool = true
+    var scanLinesEnabled: Bool = true
+    var chromaticAberration: Bool = false
 
     // MARK: - Playback
     var pointer: Int = 0

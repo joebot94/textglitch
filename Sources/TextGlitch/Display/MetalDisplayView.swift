@@ -27,14 +27,16 @@ struct CellData {
 
 /// Frame-level constants.
 struct MetalUniforms {
-    var viewportSize: SIMD2<Float>   //  8 bytes
-    var cols:         UInt32         //  4 bytes
-    var rows:         UInt32         //  4 bytes
-    var cellSize:     SIMD2<Float>   //  8 bytes
-    var gridOrigin:   SIMD2<Float>   //  8 bytes
-    var cellSpacing:  Float          //  4 bytes
-    var _pad:         Float = 0      //  4 bytes
-    // Total: 40 bytes
+    var viewportSize:   SIMD2<Float>   //  8 bytes
+    var cols:           UInt32         //  4 bytes
+    var rows:           UInt32         //  4 bytes
+    var cellSize:       SIMD2<Float>   //  8 bytes
+    var gridOrigin:     SIMD2<Float>   //  8 bytes
+    var cellSpacing:    Float          //  4 bytes
+    var glowStrength:   Float          //  4 bytes  0=off  1=full glow
+    var scanStrength:   Float          //  4 bytes  0=off  1=full scanlines
+    var chromaStrength: Float          //  4 bytes  0=off  N=pixel offset
+    // Total: 48 bytes
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,28 +62,31 @@ struct MetalUniforms {
     float2 cellSize;
     float2 gridOrigin;
     float  cellSpacing;
-    float  pad;
+    float  glowStrength;    // 0=off  1=full
+    float  scanStrength;    // 0=off  1=full
+    float  chromaStrength;  // 0=off  N=pixel-offset amount
 };
 
 struct VertOut {
     float4 pos        [[position]];
     float2 atlasUV;
-    float2 cellUV;    // 0‥1 within the cell, for border & scanline calc
+    float2 atlasSize;   // passed through for chromatic aberration calc
+    float2 cellUV;      // 0..1 within the cell, for border edge detection
     float4 color;
     float  flashAlpha;
     uint   flags;
 };
 
-// ── Vertex: one call per triangle vertex, 6 vertices = 2 triangles = 1 quad ──
+// ── Vertex: 6 verts per cell (2 triangles) ───────────────────────────────────
 vertex VertOut vert_cell(
-    uint                vid    [[vertex_id]],
-    constant CellData*  cells  [[buffer(0)]],
-    constant MetalUniforms& u  [[buffer(1)]]
+    uint                    vid   [[vertex_id]],
+    constant CellData*      cells [[buffer(0)]],
+    constant MetalUniforms& u     [[buffer(1)]]
 ) {
     uint   cellIdx  = vid / 6u;
     uint   localVid = vid % 6u;
 
-    // Unit quad corners (two CCW triangles: 0-1-2, 2-1-3)
+    // Two CCW triangles: 0-1-2, 2-1-3
     const float2 corners[4] = { {0,0},{1,0},{0,1},{1,1} };
     const uint   tris[6]    = { 0,1,2, 2,1,3 };
     float2 corner = corners[tris[localVid]];
@@ -95,7 +100,7 @@ vertex VertOut vert_cell(
     );
     float2 pixPos = origin + corner * u.cellSize;
 
-    // Metal NDC: y+ = up; pixel y+ = down → negate y
+    // Metal NDC: y+ = up, pixel y+ = down
     float2 ndc = float2(
          pixPos.x / u.viewportSize.x * 2.0 - 1.0,
         -pixPos.y / u.viewportSize.y * 2.0 + 1.0
@@ -106,6 +111,7 @@ vertex VertOut vert_cell(
     VertOut out;
     out.pos        = float4(ndc, 0.0, 1.0);
     out.atlasUV    = c.atlasUV + corner * c.atlasSize;
+    out.atlasSize  = c.atlasSize;
     out.cellUV     = corner;
     out.color      = c.color;
     out.flashAlpha = c.flashAlpha;
@@ -113,19 +119,23 @@ vertex VertOut vert_cell(
     return out;
 }
 
-// ── Fragment: glyph + glow + scanlines + border + flash ──────────────────────
+// ── Fragment: glyph · glow · chroma · scanlines · border · flash ─────────────
 fragment float4 frag_cell(
     VertOut                              in    [[stage_in]],
     texture2d<float, access::sample>     atlas [[texture(0)]],
     constant MetalUniforms&              u     [[buffer(1)]]
 ) {
-    // clamp_to_zero: outside atlas = 0 (safe for glow neighbour samples)
     constexpr sampler s(filter::linear, address::clamp_to_zero);
 
-    // Primary glyph coverage
+    // ── Chromatic aberration: R and B channels shifted ±N pixels horizontally.
+    // When chromaStrength == 0 the offset is zero and all three equal glyphCov.
+    float2 atlasPerPx = in.atlasSize / u.cellSize;
+    float2 chromaOff  = atlasPerPx * float2(u.chromaStrength, 0.0);
+    float rCov = atlas.sample(s, in.atlasUV + chromaOff).r;
     float glyphCov = atlas.sample(s, in.atlasUV).r;
+    float bCov = atlas.sample(s, in.atlasUV - chromaOff).r;
 
-    // Soft glow: sample 8 neighbours at ~3 px offset in atlas space
+    // ── Soft glow: 8-neighbour samples at ~3 atlas pixels ────────────────────
     float2 px = 1.0 / float2(atlas.get_width(), atlas.get_height());
     float glow = 0.0;
     glow += atlas.sample(s, in.atlasUV + px * float2( 3,  0)).r;
@@ -136,17 +146,18 @@ fragment float4 frag_cell(
     glow += atlas.sample(s, in.atlasUV + px * float2(-2,  2)).r;
     glow += atlas.sample(s, in.atlasUV + px * float2( 2, -2)).r;
     glow += atlas.sample(s, in.atlasUV + px * float2(-2, -2)).r;
-    glow = saturate(glow / 5.0);   // intentionally >1/8 for punchier look
+    glow = saturate(glow / 5.0) * u.glowStrength;
 
-    float3 rgb = in.color.rgb * glyphCov
+    // ── Composite glyph + glow ────────────────────────────────────────────────
+    float3 rgb = float3(in.color.r * rCov, in.color.g * glyphCov, in.color.b * bCov)
                + in.color.rgb * glow * 0.38;
-    float  a   = saturate(glyphCov + glow * 0.28);
+    float  a   = saturate((rCov + glyphCov + bCov) / 3.0 + glow * 0.28);
 
-    // Scanlines: dim every 4th row ~70 %
-    float scanDim = (uint(in.pos.y) % 4u == 0u) ? 0.28 : 1.0;
+    // ── Scanlines: dim every 4th row ─────────────────────────────────────────
+    float scanDim = (uint(in.pos.y) % 4u == 0u) ? (1.0 - 0.72 * u.scanStrength) : 1.0;
     rgb *= scanDim;
 
-    // Cell border: ~1.5 px dark ring when showBoxes is on (flags bit 0)
+    // ── Cell border: ~1.5 px dark ring (flags bit 0) ─────────────────────────
     if ((in.flags & 1u) != 0u) {
         float2 bEdge = min(in.cellUV, 1.0 - in.cellUV);
         float2 bPx   = float2(1.5 / u.cellSize.x, 1.5 / u.cellSize.y);
@@ -156,7 +167,7 @@ fragment float4 frag_cell(
         }
     }
 
-    // Flash: colour burst on each engine tick
+    // ── Flash: bright colour burst on tick ───────────────────────────────────
     if (in.flashAlpha > 0.001) {
         rgb = mix(rgb, in.color.rgb * 1.6, in.flashAlpha * 0.55);
         a   = max(a, in.flashAlpha * 0.42);
@@ -361,12 +372,15 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
         let cellW    = (Float(vSize.width)  - spacing * (cols - 1)) / cols
         let cellH    = (Float(vSize.height) - spacing * (rows - 1)) / rows
         var uniforms = MetalUniforms(
-            viewportSize: SIMD2(Float(vSize.width), Float(vSize.height)),
-            cols:         UInt32(eng.gridCols),
-            rows:         UInt32(eng.gridRows),
-            cellSize:     SIMD2(cellW, cellH),
-            gridOrigin:   .zero,
-            cellSpacing:  spacing)
+            viewportSize:   SIMD2(Float(vSize.width), Float(vSize.height)),
+            cols:           UInt32(eng.gridCols),
+            rows:           UInt32(eng.gridRows),
+            cellSize:       SIMD2(cellW, cellH),
+            gridOrigin:     .zero,
+            cellSpacing:    spacing,
+            glowStrength:   eng.glowEnabled          ? 1.0 : 0.0,
+            scanStrength:   eng.scanLinesEnabled      ? 1.0 : 0.0,
+            chromaStrength: eng.chromaticAberration   ? 3.0 : 0.0)
         uniformBuf = dev.makeBuffer(bytes: &uniforms,
                                     length: MemoryLayout<MetalUniforms>.size,
                                     options: .storageModeShared)

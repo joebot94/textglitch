@@ -240,11 +240,16 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
 
         stack.addArrangedSubview(divider())
         stack.addArrangedSubview(sectionLabel("EFFECTS"))
-        let fxRow = hStack()
-        let glowCb  = NSButton(checkboxWithTitle: "GLOW",  target: self, action: #selector(glowToggled(_:)));  glowCb.state  = engine.glowEnabled  ? .on : .off
-        let flashCb = NSButton(checkboxWithTitle: "FLASH", target: self, action: #selector(flashToggled(_:))); flashCb.state = engine.flashEnabled ? .on : .off
-        fxRow.addArrangedSubview(glowCb); fxRow.addArrangedSubview(flashCb)
-        stack.addArrangedSubview(fxRow)
+        let fxRow1 = hStack()
+        let glowCb  = NSButton(checkboxWithTitle: "GLOW",      target: self, action: #selector(glowToggled(_:)));       glowCb.state  = engine.glowEnabled          ? .on : .off
+        let flashCb = NSButton(checkboxWithTitle: "FLASH",     target: self, action: #selector(flashToggled(_:)));      flashCb.state = engine.flashEnabled         ? .on : .off
+        let scanCb  = NSButton(checkboxWithTitle: "SCANLINES", target: self, action: #selector(scanLinesToggled(_:)));  scanCb.state  = engine.scanLinesEnabled      ? .on : .off
+        let chromaCb = NSButton(checkboxWithTitle: "CHROMA",   target: self, action: #selector(chromaToggled(_:)));     chromaCb.state = engine.chromaticAberration ? .on : .off
+        fxRow1.addArrangedSubview(glowCb)
+        fxRow1.addArrangedSubview(flashCb)
+        fxRow1.addArrangedSubview(scanCb)
+        fxRow1.addArrangedSubview(chromaCb)
+        stack.addArrangedSubview(fxRow1)
 
         stack.addArrangedSubview(NSView())
         return stack
@@ -848,8 +853,10 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
         syncBoxButtons()
     }
 
-    @objc private func glowToggled(_ sender: NSButton)  { engine.glowEnabled  = sender.state == .on; engine.displayChanged.send() }
-    @objc private func flashToggled(_ sender: NSButton) { engine.flashEnabled = sender.state == .on }
+    @objc private func glowToggled(_ sender: NSButton)       { engine.glowEnabled         = sender.state == .on; engine.displayChanged.send() }
+    @objc private func flashToggled(_ sender: NSButton)      { engine.flashEnabled        = sender.state == .on }
+    @objc private func scanLinesToggled(_ sender: NSButton)  { engine.scanLinesEnabled    = sender.state == .on; engine.displayChanged.send() }
+    @objc private func chromaToggled(_ sender: NSButton)     { engine.chromaticAberration = sender.state == .on; engine.displayChanged.send() }
 
     // MARK: - Actions: Text
 

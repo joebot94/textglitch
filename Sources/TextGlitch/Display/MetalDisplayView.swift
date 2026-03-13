@@ -390,7 +390,7 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
         else { return }
 
         // ── 1. Atlas: rebuild if font or size changed ──────────────────────
-        let ptSize = computeFontPointSize(engine: eng, viewHeight: view.bounds.height)
+        let ptSize = computeFontPointSize(engine: eng, viewHeight: view.drawableSize.height)
         if atlas == nil || eng.fontFamily != atlasFont || abs(ptSize - atlasPtSize) > 0.5 {
             atlas       = GlyphAtlas(device: dev, fontName: eng.fontFamily, pointSize: ptSize)
             atlasFont   = eng.fontFamily

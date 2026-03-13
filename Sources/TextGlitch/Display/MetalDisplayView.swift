@@ -36,7 +36,9 @@ struct MetalUniforms {
     var glowStrength:   Float          //  4 bytes  0=off  1=full glow
     var scanStrength:   Float          //  4 bytes  0=off  1=full scanlines
     var chromaStrength: Float          //  4 bytes  0=off  N=pixel offset
-    // Total: 48 bytes
+    var strobeAlpha:    Float          //  4 bytes  0=off  0.85=on
+    var brightness:     Float          //  4 bytes  1.0=normal
+    // Total: 56 bytes
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -65,6 +67,8 @@ struct MetalUniforms {
     float  glowStrength;    // 0=off  1=full
     float  scanStrength;    // 0=off  1=full
     float  chromaStrength;  // 0=off  N=pixel-offset amount
+    float  strobeAlpha;     // 0=off  >0=white flash overlay
+    float  brightness;      // 1.0=normal  >1=over-bright
 };
 
 struct VertOut {
@@ -173,7 +177,56 @@ fragment float4 frag_cell(
         a   = max(a, in.flashAlpha * 0.42);
     }
 
+    // ── Brightness multiplier ─────────────────────────────────────────────────
+    rgb *= u.brightness;
+
+    // ── Strobe: white pulse overlay on every other tick ──────────────────────
+    if (u.strobeAlpha > 0.001) {
+        rgb = mix(rgb, float3(1.0), u.strobeAlpha);
+        a   = max(a, u.strobeAlpha * 0.9);
+    }
+
     return float4(rgb, a);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trail support: fade quad + blit quad
+// ─────────────────────────────────────────────────────────────────────────────
+
+// vert_quad / frag_fade — draws a full-screen solid-colour quad.
+// Used to darken the trail texture by trailDecay each frame via alpha blending.
+vertex float4 vert_quad(uint vid [[vertex_id]]) {
+    const float2 pos[6] = { {-1,-1},{1,-1},{-1,1}, {-1,1},{1,-1},{1,1} };
+    return float4(pos[vid], 0.0, 1.0);
+}
+
+fragment float4 frag_fade(
+    float4         fragCoord [[position]],
+    constant float& fadeAlpha [[buffer(0)]]
+) {
+    // Black with alpha=(1-trailDecay): blending multiplies dst by trailDecay.
+    return float4(0.0, 0.0, 0.0, fadeAlpha);
+}
+
+// vert_blit / frag_blit — copies a texture to the full screen.
+struct BlitOut { float4 pos [[position]]; float2 uv; };
+
+vertex BlitOut vert_blit(uint vid [[vertex_id]]) {
+    const float2 pos[6] = { {-1,-1},{1,-1},{-1,1}, {-1,1},{1,-1},{1,1} };
+    // UV: Metal texture origin is top-left; NDC y+ = up, so flip V.
+    const float2 uv[6]  = { {0,1},{1,1},{0,0}, {0,0},{1,1},{1,0} };
+    BlitOut out;
+    out.pos = float4(pos[vid], 0.0, 1.0);
+    out.uv  = uv[vid];
+    return out;
+}
+
+fragment float4 frag_blit(
+    BlitOut                              in  [[stage_in]],
+    texture2d<float, access::sample>     tex [[texture(0)]]
+) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    return tex.sample(s, in.uv);
 }
 """
 
@@ -189,9 +242,19 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
 
     // MARK: – Metal objects
     private var cmdQueue:     MTLCommandQueue!
-    private var pipeline:     MTLRenderPipelineState!
+    private var pipeline:     MTLRenderPipelineState!   // cell renderer
+    private var fadePipeline: MTLRenderPipelineState!   // trail fade quad
+    private var blitPipeline: MTLRenderPipelineState!   // trail → drawable blit
     private var cellBuf:      MTLBuffer?
     private var uniformBuf:   MTLBuffer?
+
+    // MARK: – Trail
+    private var trailTex:      MTLTexture?
+    private var trailTexSize:  CGSize = .zero
+    private var trailNeedsInit = false
+
+    // MARK: – Strobe
+    private var strobePhase = false
 
     // MARK: – Glyph atlas
     private var atlas:        GlyphAtlas?
@@ -240,20 +303,44 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
             fatalError("[MetalDisplayView] Shader compile error: \(error)")
         }
 
+        // ── Cell renderer (standard alpha blend) ─────────────────────────────
         let pd = MTLRenderPipelineDescriptor()
         pd.vertexFunction   = lib.makeFunction(name: "vert_cell")!
         pd.fragmentFunction = lib.makeFunction(name: "frag_cell")!
-        pd.colorAttachments[0].pixelFormat                    = colorPixelFormat
-        pd.colorAttachments[0].isBlendingEnabled              = true
-        pd.colorAttachments[0].rgbBlendOperation              = .add
-        pd.colorAttachments[0].alphaBlendOperation            = .add
-        pd.colorAttachments[0].sourceRGBBlendFactor           = .sourceAlpha
-        pd.colorAttachments[0].sourceAlphaBlendFactor         = .sourceAlpha
-        pd.colorAttachments[0].destinationRGBBlendFactor      = .oneMinusSourceAlpha
-        pd.colorAttachments[0].destinationAlphaBlendFactor    = .oneMinusSourceAlpha
+        pd.colorAttachments[0].pixelFormat                 = colorPixelFormat
+        pd.colorAttachments[0].isBlendingEnabled           = true
+        pd.colorAttachments[0].rgbBlendOperation           = .add
+        pd.colorAttachments[0].alphaBlendOperation         = .add
+        pd.colorAttachments[0].sourceRGBBlendFactor        = .sourceAlpha
+        pd.colorAttachments[0].sourceAlphaBlendFactor      = .sourceAlpha
+        pd.colorAttachments[0].destinationRGBBlendFactor   = .oneMinusSourceAlpha
+        pd.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        // ── Fade quad (trail decay): src=0, dst *= oneMinusSourceAlpha ────────
+        // A black quad with alpha=(1-decay) multiplies the trail by `decay`.
+        let fpd = MTLRenderPipelineDescriptor()
+        fpd.vertexFunction   = lib.makeFunction(name: "vert_quad")!
+        fpd.fragmentFunction = lib.makeFunction(name: "frag_fade")!
+        fpd.colorAttachments[0].pixelFormat                 = colorPixelFormat
+        fpd.colorAttachments[0].isBlendingEnabled           = true
+        fpd.colorAttachments[0].rgbBlendOperation           = .add
+        fpd.colorAttachments[0].alphaBlendOperation         = .add
+        fpd.colorAttachments[0].sourceRGBBlendFactor        = .zero
+        fpd.colorAttachments[0].destinationRGBBlendFactor   = .oneMinusSourceAlpha
+        fpd.colorAttachments[0].sourceAlphaBlendFactor      = .zero
+        fpd.colorAttachments[0].destinationAlphaBlendFactor = .one
+
+        // ── Blit quad (trail → drawable, no blending) ─────────────────────────
+        let bpd = MTLRenderPipelineDescriptor()
+        bpd.vertexFunction   = lib.makeFunction(name: "vert_blit")!
+        bpd.fragmentFunction = lib.makeFunction(name: "frag_blit")!
+        bpd.colorAttachments[0].pixelFormat      = colorPixelFormat
+        bpd.colorAttachments[0].isBlendingEnabled = false
 
         do {
-            pipeline = try dev.makeRenderPipelineState(descriptor: pd)
+            pipeline     = try dev.makeRenderPipelineState(descriptor: pd)
+            fadePipeline = try dev.makeRenderPipelineState(descriptor: fpd)
+            blitPipeline = try dev.makeRenderPipelineState(descriptor: bpd)
         } catch {
             fatalError("[MetalDisplayView] Pipeline error: \(error)")
         }
@@ -268,11 +355,15 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self, let eng = self.engine else { return }
-                guard eng.flashEnabled else { return }
-                let activeSet = Set(eng.visibleIndices)
-                for i in 0..<self.flashAlphas.count where activeSet.contains(i) {
-                    self.flashAlphas[i] = 0.88
+                // Flash
+                if eng.flashEnabled {
+                    let activeSet = Set(eng.visibleIndices)
+                    for i in 0..<self.flashAlphas.count where activeSet.contains(i) {
+                        self.flashAlphas[i] = 0.88
+                    }
                 }
+                // Strobe: flip phase on every tick
+                self.strobePhase = eng.strobeEnabled ? !self.strobePhase : false
             }
             .store(in: &cancellables)
 
@@ -286,6 +377,8 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         needsRebuild = true
+        trailTex     = nil      // force recreation at new drawable size
+        trailNeedsInit = false
     }
 
     func draw(in view: MTKView) {
@@ -378,37 +471,65 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
             cellSize:       SIMD2(cellW, cellH),
             gridOrigin:     .zero,
             cellSpacing:    spacing,
-            glowStrength:   eng.glowEnabled          ? 1.0 : 0.0,
-            scanStrength:   eng.scanLinesEnabled      ? 1.0 : 0.0,
-            chromaStrength: eng.chromaticAberration   ? 3.0 : 0.0)
+            glowStrength:   eng.glowEnabled         ? 1.0 : 0.0,
+            scanStrength:   eng.scanLinesEnabled     ? 1.0 : 0.0,
+            chromaStrength: eng.chromaticAberration  ? 3.0 : 0.0,
+            strobeAlpha:    (eng.strobeEnabled && strobePhase) ? 0.88 : 0.0,
+            brightness:     eng.brightness)
         uniformBuf = dev.makeBuffer(bytes: &uniforms,
                                     length: MemoryLayout<MetalUniforms>.size,
                                     options: .storageModeShared)
 
-        // ── 7. Set background clear colour ────────────────────────────────
+        // ── 7. Background clear colour (applied to drawable in step 8) ───────
         let bgSRGB = (NSColor(hex: eng.bgColor) ?? .black).usingColorSpace(.sRGB) ?? .black
-        rpd.colorAttachments[0].clearColor = MTLClearColor(
+        let bgClear = MTLClearColor(
             red:   bgSRGB.redComponent,
             green: bgSRGB.greenComponent,
             blue:  bgSRGB.blueComponent,
             alpha: 1)
 
         // ── 8. Encode & present ───────────────────────────────────────────
-        guard
-            let cmdbuf = cmdQueue.makeCommandBuffer(),
-            let enc    = cmdbuf.makeRenderCommandEncoder(descriptor: rpd)
-        else { return }
+        guard let cmdbuf = cmdQueue.makeCommandBuffer() else { return }
 
-        enc.setRenderPipelineState(pipeline)
-        if let cb = cellBuf    { enc.setVertexBuffer(cb, offset: 0, index: 0) }
-        if let ub = uniformBuf {
-            enc.setVertexBuffer(ub, offset: 0, index: 1)
-            enc.setFragmentBuffer(ub, offset: 0, index: 1)
+        if eng.trailEnabled {
+            // ── 8a. Ensure trail texture exists and matches drawable size ──────
+            ensureTrailTexture(device: dev, size: view.drawableSize)
+            guard let trail = trailTex else { return }
+
+            // ── 8b. Fade existing trail content ───────────────────────────────
+            var fadeAlpha: Float = 1.0 - eng.trailDecay
+            let fadeRPD = makeSingleTextureRPD(trail, load: .load)
+            if let enc = cmdbuf.makeRenderCommandEncoder(descriptor: fadeRPD) {
+                enc.setRenderPipelineState(fadePipeline)
+                enc.setFragmentBytes(&fadeAlpha, length: MemoryLayout<Float>.size, index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+                enc.endEncoding()
+            }
+
+            // ── 8c. Render cells onto the trail ───────────────────────────────
+            let cellRPD = makeSingleTextureRPD(trail, load: .load)
+            if let enc = cmdbuf.makeRenderCommandEncoder(descriptor: cellRPD) {
+                encodeCells(enc, cellCount: n)
+                enc.endEncoding()
+            }
+
+            // ── 8d. Blit trail to drawable ────────────────────────────────────
+            rpd.colorAttachments[0].clearColor = bgClear
+            if let enc = cmdbuf.makeRenderCommandEncoder(descriptor: rpd) {
+                enc.setRenderPipelineState(blitPipeline)
+                enc.setFragmentTexture(trail, index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+                enc.endEncoding()
+            }
+        } else {
+            // ── Normal render (no trail) ──────────────────────────────────────
+            rpd.colorAttachments[0].clearColor = bgClear
+            if let enc = cmdbuf.makeRenderCommandEncoder(descriptor: rpd) {
+                encodeCells(enc, cellCount: n)
+                enc.endEncoding()
+            }
         }
-        if let atlasTex = atlas?.texture { enc.setFragmentTexture(atlasTex, index: 0) }
 
-        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: n * 6)
-        enc.endEncoding()
         cmdbuf.present(drawable)
         cmdbuf.commit()
     }
@@ -418,5 +539,54 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
     private func computeFontPointSize(engine eng: GridEngine, viewHeight: CGFloat) -> CGFloat {
         let cellH = (viewHeight - CGFloat(eng.gridRows - 1)) / CGFloat(max(1, eng.gridRows))
         return max(6, cellH * CGFloat(eng.fontSizePct) / 100.0)
+    }
+
+    // ── Encode cell draw commands into an already-open encoder ───────────────
+    private func encodeCells(_ enc: MTLRenderCommandEncoder, cellCount n: Int) {
+        enc.setRenderPipelineState(pipeline)
+        if let cb = cellBuf    { enc.setVertexBuffer(cb, offset: 0, index: 0) }
+        if let ub = uniformBuf {
+            enc.setVertexBuffer(ub, offset: 0, index: 1)
+            enc.setFragmentBuffer(ub, offset: 0, index: 1)
+        }
+        if let atlasTex = atlas?.texture { enc.setFragmentTexture(atlasTex, index: 0) }
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: n * 6)
+    }
+
+    // ── Build a render-pass descriptor targeting a single texture ─────────────
+    private func makeSingleTextureRPD(_ tex: MTLTexture,
+                                       load: MTLLoadAction) -> MTLRenderPassDescriptor {
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture     = tex
+        rpd.colorAttachments[0].loadAction  = load
+        rpd.colorAttachments[0].storeAction = .store
+        if load == .clear {
+            rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        }
+        return rpd
+    }
+
+    // ── Create (or recreate) the persistent trail texture ────────────────────
+    private func ensureTrailTexture(device dev: MTLDevice, size: CGSize) {
+        guard trailTex == nil || trailTexSize != size else { return }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: colorPixelFormat,
+            width:       max(1, Int(size.width)),
+            height:      max(1, Int(size.height)),
+            mipmapped:   false)
+        desc.usage       = [.renderTarget, .shaderRead]
+        desc.storageMode = .private
+        trailTex      = dev.makeTexture(descriptor: desc)
+        trailTexSize  = size
+        trailNeedsInit = true
+
+        // Clear the new texture to black immediately
+        if let tex = trailTex,
+           let cb  = cmdQueue.makeCommandBuffer() {
+            let clearRPD = makeSingleTextureRPD(tex, load: .clear)
+            if let enc = cb.makeRenderCommandEncoder(descriptor: clearRPD) { enc.endEncoding() }
+            cb.commit()
+            trailNeedsInit = false
+        }
     }
 }

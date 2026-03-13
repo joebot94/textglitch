@@ -94,6 +94,10 @@ final class GridEngine {
     var showBoxes: Bool = true
     var scanLinesEnabled: Bool = true
     var chromaticAberration: Bool = false
+    var strobeEnabled: Bool = false
+    var trailEnabled: Bool = false
+    var trailDecay: Float = 0.85        // 0.70 (short trail) … 0.99 (long trail)
+    var brightness: Float = 1.0         // 0.2 (dim) … 3.0 (over-bright)
 
     // MARK: - Playback
     var pointer: Int = 0

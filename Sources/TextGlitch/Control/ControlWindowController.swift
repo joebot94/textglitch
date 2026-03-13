@@ -151,6 +151,8 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - LAYOUT tab
 
+    private var trailDecayLabel: NSTextField!
+
     private func buildLayoutTab() -> NSView {
         let stack = vStack(spacing: 10, margins: 12)
 
@@ -251,6 +253,25 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
         fxRow1.addArrangedSubview(chromaCb)
         stack.addArrangedSubview(fxRow1)
 
+        let fxRow2 = hStack()
+        let strobeCb = NSButton(checkboxWithTitle: "STROBE", target: self, action: #selector(strobeToggled(_:)))
+        strobeCb.state = engine.strobeEnabled ? .on : .off
+        let trailCb  = NSButton(checkboxWithTitle: "TRAIL",  target: self, action: #selector(trailToggled(_:)))
+        trailCb.state = engine.trailEnabled ? .on : .off
+        fxRow2.addArrangedSubview(strobeCb)
+        fxRow2.addArrangedSubview(trailCb)
+        stack.addArrangedSubview(fxRow2)
+
+        stack.addArrangedSubview(sectionLabel("TRAIL DECAY"))
+        let decayRow = hStack()
+        let decaySlider = NSSlider(value: Double(engine.trailDecay), minValue: 0.70, maxValue: 0.99,
+                                   target: self, action: #selector(trailDecayChanged(_:)))
+        decaySlider.tag = 960
+        trailDecayLabel = makeLabel(String(format: "%.2f", engine.trailDecay))
+        decayRow.addArrangedSubview(decaySlider)
+        decayRow.addArrangedSubview(trailDecayLabel)
+        stack.addArrangedSubview(decayRow)
+
         stack.addArrangedSubview(NSView())
         return stack
     }
@@ -334,6 +355,7 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - STYLE tab
 
     private var fontSizeLabel: NSTextField!
+    private var brightnessLabel: NSTextField!
     private var swatchButtons: [(NSButton, String)] = []
     private var customColorWell: NSColorWell!
 
@@ -405,6 +427,17 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
             bgRow.addArrangedSubview(btn)
         }
         stack.addArrangedSubview(bgRow)
+
+        stack.addArrangedSubview(divider())
+        stack.addArrangedSubview(sectionLabel("BRIGHTNESS"))
+        let brightnessRow = hStack()
+        let brightnessSlider = NSSlider(value: Double(engine.brightness), minValue: 0.2, maxValue: 3.0,
+                                        target: self, action: #selector(brightnessChanged(_:)))
+        brightnessSlider.tag = 970
+        brightnessLabel = makeLabel(String(format: "%.1f×", engine.brightness))
+        brightnessRow.addArrangedSubview(brightnessSlider)
+        brightnessRow.addArrangedSubview(brightnessLabel)
+        stack.addArrangedSubview(brightnessRow)
 
         stack.addArrangedSubview(NSView())
         return stack
@@ -857,6 +890,17 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
     @objc private func flashToggled(_ sender: NSButton)      { engine.flashEnabled        = sender.state == .on }
     @objc private func scanLinesToggled(_ sender: NSButton)  { engine.scanLinesEnabled    = sender.state == .on; engine.displayChanged.send() }
     @objc private func chromaToggled(_ sender: NSButton)     { engine.chromaticAberration = sender.state == .on; engine.displayChanged.send() }
+    @objc private func strobeToggled(_ sender: NSButton)     { engine.strobeEnabled       = sender.state == .on }
+    @objc private func trailToggled(_ sender: NSButton)      { engine.trailEnabled        = sender.state == .on; engine.displayChanged.send() }
+    @objc private func trailDecayChanged(_ sender: NSSlider) {
+        engine.trailDecay = Float(sender.doubleValue)
+        trailDecayLabel.stringValue = String(format: "%.2f", engine.trailDecay)
+    }
+    @objc private func brightnessChanged(_ sender: NSSlider) {
+        engine.brightness = Float(sender.doubleValue)
+        brightnessLabel.stringValue = String(format: "%.1f×", engine.brightness)
+        engine.displayChanged.send()
+    }
 
     // MARK: - Actions: Text
 

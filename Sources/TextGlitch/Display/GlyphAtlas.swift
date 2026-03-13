@@ -9,9 +9,10 @@ import CoreText
 
 final class GlyphAtlas {
     // MARK: – Public read-only state
-    let texture: MTLTexture
-    let glyphW:  Int          // atlas cell width  in pixels
-    let glyphH:  Int          // atlas cell height in pixels
+    let texture:  MTLTexture
+    let glyphW:   Int          // atlas cell width  in pixels
+    let glyphH:   Int          // atlas cell height in pixels
+    let baseline: Int          // pixels from cell bottom to text baseline
 
     // MARK: – Private atlas layout constants
     private static let firstCode  = 32    // U+0020 space
@@ -45,16 +46,38 @@ final class GlyphAtlas {
     /// Returns nil if Metal texture creation fails.
     init?(device: MTLDevice, fontName: String, pointSize: CGFloat) {
         let pt = max(6.0, pointSize)
-        // Glyph cell dimensions — give a bit of headroom for wide/tall glyphs.
-        let gw = max(4, Int(ceil(pt * 0.75)))
-        let gh = max(4, Int(ceil(pt * 1.45)))
-        self.glyphW = gw
-        self.glyphH = gh
+
+        // ── 0. Resolve font first (needed for bounding-box measurement) ──────────
+        let resolvedFont: CTFont = {
+            let attempt = CTFontCreateWithName(fontName as CFString, pt, nil)
+            // CTFontCreateWithName always returns something; verify by PostScript name.
+            let psName = CTFontCopyPostScriptName(attempt) as String
+            if psName.lowercased().contains("helvetica") && fontName != "Helvetica" {
+                return CTFontCreateWithName("Menlo-Bold" as CFString, pt, nil)
+            }
+            return attempt
+        }()
+
+        // ── 1. Measure atlas cell size from the font's own bounding box ──────────
+        // CTFontGetBoundingBox returns the union bounding box of all glyphs at `pt`.
+        // This avoids hard-coded multipliers that break for wide fonts (e.g. Impact "W").
+        let bbox      = CTFontGetBoundingBox(resolvedFont)
+        let descender = abs(min(0, bbox.minY))   // pixels below baseline
+        let ascender  = max(0, bbox.maxY)         // pixels above baseline
+        let pad       = max(2, Int(pt * 0.06))    // small padding (~6 % of pt size)
+
+        let gw = max(4, Int(ceil(bbox.width))  + pad * 2)
+        let gh = max(4, Int(ceil(ascender + descender)) + pad * 2)
+        let bl = Int(ceil(descender)) + pad       // baseline offset from cell bottom
+
+        self.glyphW   = gw
+        self.glyphH   = gh
+        self.baseline = bl
 
         let atlasW = gw * GlyphAtlas.atlasCols
         let atlasH = gh * GlyphAtlas.atlasRows
 
-        // ── 1. Rasterise to an RGBA8 CGContext (easier than single-channel) ──────
+        // ── 2. Rasterise to an RGBA8 CGContext (easier than single-channel) ──────
         let stride = atlasW * 4
         var rgba   = [UInt8](repeating: 0, count: atlasH * stride)
 
@@ -70,17 +93,6 @@ final class GlyphAtlas {
         ctx.setFillColor(CGColor(gray: 0, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: atlasW, height: atlasH))
 
-        // Resolve font — fall back to system monospace if the name is not found
-        let resolvedFont: CTFont = {
-            let attempt = CTFontCreateWithName(fontName as CFString, pt, nil)
-            // CTFontCreateWithName always returns something; verify by checking its PostScript name
-            let psName = CTFontCopyPostScriptName(attempt) as String
-            if psName.lowercased().contains("helvetica") && fontName != "Helvetica" {
-                return CTFontCreateWithName("Menlo-Bold" as CFString, pt, nil)
-            }
-            return attempt
-        }()
-
         let attrs: [NSAttributedString.Key: Any] = [
             kCTFontAttributeName as NSAttributedString.Key: resolvedFont,
             kCTForegroundColorAttributeName as NSAttributedString.Key: CGColor(gray: 1, alpha: 1)
@@ -95,15 +107,14 @@ final class GlyphAtlas {
             let line    = CTLineCreateWithAttributedString(
                 NSAttributedString(string: charStr, attributes: attrs))
 
-            // CGContext origin is bottom-left; row 0 is at top of atlas image
+            // CGContext origin is bottom-left; row 0 is at top of atlas image.
             let x = col * gw
-            // baseline: move up from cell bottom by ~18 % of point size
-            let y = atlasH - (row + 1) * gh + Int(pt * 0.18)
+            let y = atlasH - (row + 1) * gh + bl   // baseline from cell bottom = bl
             ctx.textPosition = CGPoint(x: x, y: y)
             CTLineDraw(line, ctx)
         }
 
-        // ── 2. Extract red channel → r8Unorm MTLTexture ──────────────────────────
+        // ── 3. Extract red channel → r8Unorm MTLTexture ──────────────────────────
         var r8 = [UInt8](repeating: 0, count: atlasW * atlasH)
         for i in 0..<(atlasW * atlasH) {
             r8[i] = rgba[i * 4]   // red == glyph coverage (white-on-black)

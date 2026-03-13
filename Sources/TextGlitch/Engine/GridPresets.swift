@@ -12,15 +12,18 @@ func normalizePresetName(_ name: String) -> String {
 }
 
 func normalizeGridProfile(_ name: String) -> String? {
-    let raw = name
-        .trimmingCharacters(in: .whitespaces)
+    let trimmed = name.trimmingCharacters(in: .whitespaces)
+    // Direct match (most common path — e.g. from the pop-up button)
+    if gridProfileNames.contains(trimmed) { return trimmed }
+    // Normalise: collapse spaces, lowercase, swap letter-x for multiplication sign
+    let cooked = trimmed
         .lowercased()
         .replacingOccurrences(of: " ", with: "")
-    let aliases: [String: String] = [
-        "1x1": "1×1", "2x2": "2×2", "3x3": "3×3", "3x4": "3×4", "4x4": "4×4",
-        "1×1": "1×1", "2×2": "2×2", "3×3": "3×3", "3×4": "3×4", "4×4": "4×4",
-    ]
-    return aliases[raw]
+        .replacingOccurrences(of: "x", with: "×")
+    // Search profiles for a cooked match
+    return gridProfiles.first(where: {
+        $0.name.lowercased().replacingOccurrences(of: " ", with: "") == cooked
+    })?.name
 }
 
 func computePresetIndices(preset: String, rows: Int, cols: Int) -> [Int] {

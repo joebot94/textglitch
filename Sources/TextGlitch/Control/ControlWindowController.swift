@@ -837,6 +837,10 @@ final class ControlWindowController: NSWindowController, NSWindowDelegate {
     @objc private func gridProfileChanged(_ sender: NSPopUpButton) {
         guard let title = sender.titleOfSelectedItem else { return }
         engine.setGridProfile(title)
+        // Reset to All so the full new grid is immediately visible,
+        // regardless of whatever preset was active on the previous profile.
+        auto.applyManualPreset("All", source: "ui")
+        syncPresetButtons()
     }
 
     @objc private func presetButtonPressed(_ sender: NSButton) {
